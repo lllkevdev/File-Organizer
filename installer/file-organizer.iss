@@ -2,7 +2,9 @@
 ; Build the PyInstaller outputs first (see installer\build.ps1).
 
 #define MyAppName "File Organizer"
-#define MyAppVersion "0.3.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.4.0"
+#endif
 #define MyAppPublisher "File Organizer"
 #define MyAppExeName "FileOrganizer.exe"
 

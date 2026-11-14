@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app import __version__
 from app.journal import default_journal_path
 from app.logging_setup import configure_logging
 from app.organizer import OrganizeResult, organize_files
@@ -67,7 +68,7 @@ class OrganizeWorker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("File Organizer")
+        self.setWindowTitle(f"File Organizer {__version__}")
         self.resize(760, 520)
         self._thread: QThread | None = None
         self._worker: OrganizeWorker | None = None

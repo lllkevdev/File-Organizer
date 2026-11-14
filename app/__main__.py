@@ -5,6 +5,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from app import __version__
 from app.journal import default_journal_path, undo_last_run
 from app.logging_setup import configure_logging
 from app.organizer import OrganizeResult, execute_plan, organize_files
@@ -63,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         action="store_true",
         help="enable verbose logging",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     return parser
 

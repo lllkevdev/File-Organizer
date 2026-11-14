@@ -10,13 +10,25 @@ Set-Location $root
 
 $python = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
-    throw "No se encontro .venv. Crea el entorno e instala dependencias: python -m venv .venv; pip install -e '.[dev]'"
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCommand) {
+        $python = $pythonCommand.Source
+    }
+}
+if (-not $python -or -not (Test-Path -LiteralPath $python)) {
+    throw "No se encontro Python. Crea .venv o instala Python 3.10+ en el PATH."
 }
 
 & $python -c "import PySide6" 2>$null
 if ($LASTEXITCODE -ne 0) {
     throw "PySide6 no esta instalado. Ejecuta: pip install -e '.[gui]'"
 }
+
+$versionOutput = & $python -c "import app; print(app.__version__)"
+if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
+    throw "No se pudo determinar la version del paquete."
+}
+$version = ("$versionOutput").Trim()
 
 & $python -m pip install --disable-pip-version-check -q pyinstaller
 if ($LASTEXITCODE -ne 0) {
@@ -68,8 +80,8 @@ if (-not $iscc) {
     exit 0
 }
 
-Write-Host "Generando instalador con Inno Setup..."
-& $iscc "installer\file-organizer.iss"
+Write-Host "Generando instalador con Inno Setup (v$version)..."
+& $iscc "/DMyAppVersion=$version" "installer\file-organizer.iss"
 if ($LASTEXITCODE -ne 0) {
     throw "Fallo la creacion del instalador."
 }

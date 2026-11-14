@@ -38,6 +38,27 @@ def test_read_invalid_journal(tmp_path):
         read_journal(journal)
 
 
+def test_read_journal_with_invalid_entry(tmp_path):
+    journal = tmp_path / "journal.json"
+    journal.write_text('{"entries": [{}]}', encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        read_journal(journal)
+
+
+def test_undo_skips_missing_moved_file(tmp_path):
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+    journal = tmp_path / "journal.json"
+    write_journal([(source, destination)], journal)
+
+    result = undo_last_run(journal)
+
+    assert result.ok
+    assert len(result.skipped) == 1
+    assert journal.exists()
+
+
 def test_undo_restores_files(tmp_path):
     source = tmp_path / "source" / "photo.jpg"
     destination = tmp_path / "dest" / "photo.jpg"

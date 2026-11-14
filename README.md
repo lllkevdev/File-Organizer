@@ -96,7 +96,7 @@ Salidas:
 
 - `dist\FileOrganizer\FileOrganizer.exe`: GUI portable.
 - `dist\file-organizer.exe`: CLI portable.
-- `dist\installer\FileOrganizer-Setup-0.3.0.exe`: instalador (si Inno Setup está disponible).
+- `dist\installer\FileOrganizer-Setup-<versión>.exe`: instalador (si Inno Setup está disponible). La versión se toma de `app.__version__`.
 
 El instalador agrega la app al menú Inicio, crea opcionalmente un acceso directo
 en el escritorio e incluye la CLI en la carpeta de instalación.
@@ -131,9 +131,15 @@ python -m venv .venv
 pip install -e ".[dev]"
 
 pytest
+pytest --cov=app --cov-report=term-missing
 ruff check .
 mypy app
 ```
+
+La versión se define en `app/__init__.py` (`__version__`) y se propaga a
+`pyproject.toml` (dinámica), la GUI, la CLI (`--version`) y el instalador.
+La CI prueba Python 3.10–3.13 en Linux y Windows, exige cobertura mínima del
+85% (excluyendo la GUI) y genera el build portable en Windows.
 
 ## Limitaciones
 
