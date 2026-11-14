@@ -14,7 +14,7 @@ subcarpetas dentro del origen (modo in-place).
 | Audio | `.mp3`, `.wav`, `.flac` | Música (`Music`) |
 | Videos | `.mp4`, `.avi`, `.mkv`, `.mov` | Vídeos (`Videos`) |
 | Documents | `.pdf`, `.docx`, `.txt`, `.xlsx`, `.pptx` | Documentos (`Documents`) |
-| Archives | `.zip`, `.rar`, `.7z` | Documentos |
+| Archives | `.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.bz2`, `.xz`, `.zst` (también `.tar.gz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`) | Documentos |
 | Other | cualquier otra extensión | Documentos |
 
 Las carpetas del sistema se resuelven con `SHGetKnownFolderPath`, respetando las
@@ -37,13 +37,16 @@ file-organizer "C:\Users\kev\Downloads" --recursive --exclude "*.bak" --yes
 
 # Deshacer el último run (lee el journal de la última ejecución)
 file-organizer --undo
+
+# Revisar qué se restauraría sin mover nada
+file-organizer --undo --dry-run
 ```
 
 Opciones:
 
 - `--in-place`: crea subcarpetas por categoría dentro de la carpeta origen.
 - `--dry-run`: muestra los movimientos planeados sin mover archivos.
-- `--recursive`: procesa también archivos dentro de subcarpetas (omite las carpetas de categoría).
+- `--recursive`: procesa también archivos dentro de subcarpetas (omite las carpetas de categoría del primer nivel).
 - `--exclude PATTERN`: patrón de nombre a ignorar; se puede repetir.
 - `-y`, `--yes`: no pide confirmación.
 - `--undo`: restaura los archivos movidos en el último run registrado en el journal.
@@ -53,7 +56,7 @@ Opciones:
 Cada ejecución que mueve archivos escribe un journal con los pares origen→destino.
 `--undo` los restaura en orden inverso, sin sobrescribir archivos existentes.
 
-Por defecto se ignoran archivos ocultos (`.DS_Store`, `.gitignore`, etc.),
+Por defecto se ignoran archivos y carpetas ocultos (`.DS_Store`, `.git/`, etc.),
 `Thumbs.db`, `desktop.ini`, `~$*` y `*.tmp`.
 
 Los nombres duplicados se resuelven añadiendo un sufijo numérico

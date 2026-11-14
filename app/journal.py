@@ -51,8 +51,8 @@ def write_journal(
     created_at = datetime.now(timezone.utc).isoformat()
     entries = [
         {
-            "source": str(source),
-            "destination": str(destination),
+            "source": str(Path(source).resolve()),
+            "destination": str(Path(destination).resolve()),
             "moved_at": created_at,
         }
         for source, destination in moves
@@ -60,7 +60,7 @@ def write_journal(
 
     payload = {"created_at": created_at, "entries": entries}
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(f"{target.name}.tmp")
+    temporary = target.with_name(f"{target.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(target)
 
@@ -77,20 +77,28 @@ def read_journal(path: str | Path | None = None) -> list[JournalEntry]:
     try:
         payload = json.loads(target.read_text(encoding="utf-8"))
         raw_entries = payload["entries"]
+        if not isinstance(raw_entries, list):
+            raise TypeError("journal entries must be a list")
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise ValueError(f"Journal inválido: {target}") from exc
 
     entries: list[JournalEntry] = []
     for raw in raw_entries:
         try:
+            source = raw["source"]
+            destination = raw["destination"]
+            if not isinstance(source, str) or not isinstance(destination, str):
+                raise TypeError("journal paths must be strings")
+            if not source or not destination:
+                raise ValueError("journal paths must not be empty")
             entries.append(
                 JournalEntry(
-                    source=Path(raw["source"]),
-                    destination=Path(raw["destination"]),
+                    source=Path(source),
+                    destination=Path(destination),
                     moved_at=str(raw.get("moved_at", "")),
                 )
             )
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Entrada de journal inválida en: {target}") from exc
 
     return entries
@@ -112,11 +120,19 @@ def undo_last_run(
         source = entry.source
 
         if dry_run:
+            if not destination.is_file():
+                result.skipped.append((destination, "El archivo movido ya no existe."))
+                continue
+            if source.exists():
+                result.skipped.append(
+                    (destination, f"El destino original ya existe: {source}")
+                )
+                continue
             result.restored.append((destination, source))
             continue
 
         try:
-            if not destination.exists():
+            if not destination.is_file():
                 result.skipped.append((destination, "El archivo movido ya no existe."))
                 continue
             if source.exists():

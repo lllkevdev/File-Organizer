@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from app.organizer import (
+    Move,
     OrganizeResult,
     _collect_files,
     execute_plan,
@@ -516,6 +517,74 @@ def test_execute_plan_reports_missing_source(tmp_path):
     assert not result.ok
     assert result.moved == []
     assert result.errors[0][0] == photo
+
+
+def test_execute_plan_rejects_non_dry_plan(tmp_path):
+    plan = OrganizeResult(
+        moved=[Move(tmp_path / "a.txt", tmp_path / "Images" / "a.txt")],
+        dry_run=False,
+    )
+
+    with pytest.raises(ValueError):
+        execute_plan(plan)
+
+
+def test_execute_plan_keeps_preview_errors(tmp_path, monkeypatch):
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    photo = folder / "photo.jpg"
+    photo.touch()
+    (folder / "song.mp3").touch()
+
+    real_get_destination = get_destination
+
+    def failing_get_destination(folder_path, category, **kwargs):
+        if category == "Images":
+            raise OSError("access denied")
+        return real_get_destination(folder_path, category, **kwargs)
+
+    monkeypatch.setattr("app.organizer.get_destination", failing_get_destination)
+    plan = organize_files(folder, to_system=False, dry_run=True)
+
+    assert plan.errors
+
+    result = execute_plan(plan)
+
+    assert result.errors == plan.errors
+    assert (folder / "Audio" / "song.mp3").exists()
+
+
+def test_recursive_ignores_hidden_directories(tmp_path):
+    folder = tmp_path / "Downloads"
+    (folder / ".git").mkdir(parents=True)
+    (folder / "nested" / ".cache").mkdir(parents=True)
+    git_config = folder / ".git" / "config"
+    cache_file = folder / "nested" / ".cache" / "note.txt"
+    song = folder / "song.mp3"
+    git_config.touch()
+    cache_file.touch()
+    song.touch()
+
+    result = organize_files(folder, to_system=False, recursive=True)
+
+    assert git_config.exists()
+    assert cache_file.exists()
+    assert (folder / "Audio" / "song.mp3").exists()
+    assert [move.source for move in result.moved] == [song]
+
+
+def test_relative_folder_paths_are_resolved(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    folder = Path("Downloads")
+    folder.mkdir()
+    photo = folder / "photo.jpg"
+    photo.touch()
+
+    result = organize_files("Downloads", to_system=False, dry_run=True)
+
+    assert result.moved[0].source.is_absolute()
+    assert result.moved[0].source == (folder / "photo.jpg").resolve()
+    assert result.moved[0].destination.is_absolute()
 
 
 def test_execute_plan_avoids_overwriting_new_file(tmp_path):

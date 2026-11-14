@@ -2,10 +2,13 @@ import sys
 import time
 
 import pytest
-from PySide6.QtWidgets import QApplication
 
-from app import __version__
-from app.gui import MainWindow
+pytest.importorskip("PySide6.QtWidgets")
+
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from app import __version__  # noqa: E402
+from app.gui import MainWindow  # noqa: E402
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="GUI smoke runs on Windows")
 

@@ -75,7 +75,7 @@ def organize_files(
         journal_path: When set, write the performed moves to this journal file so
             they can be reverted with :func:`app.journal.undo_last_run`.
     """
-    folder = Path(folder)
+    folder = Path(folder).resolve()
     _validate_folder(folder)
 
     patterns = (*DEFAULT_EXCLUDES, *(excludes or ()))
@@ -140,15 +140,19 @@ def execute_plan(
     Destinations are revalidated before each move so a file created in the
     meantime is never overwritten.
     """
+    if not plan.dry_run:
+        raise ValueError("execute_plan expects a dry-run plan.")
+
     result = OrganizeResult(dry_run=False)
     result.skipped.extend(plan.skipped)
+    result.errors.extend(plan.errors)
     reserved: set[Path] = set()
 
     for move in plan.moved:
         source = move.source
 
         try:
-            if not source.exists():
+            if not source.is_file():
                 result.errors.append((source, "El archivo de origen ya no existe."))
                 continue
             move.destination.parent.mkdir(parents=True, exist_ok=True)
@@ -204,9 +208,10 @@ def _collect_files(
     for item in candidates:
         if not item.is_file():
             continue
+        relative = item.relative_to(folder)
         if skip_category_dirs and _is_in_category_dir(item, folder):
             continue
-        if _is_excluded(item.name, excludes):
+        if any(_is_excluded(part, excludes) for part in relative.parts):
             continue
         files.append(item)
 

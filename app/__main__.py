@@ -81,7 +81,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     journal = args.journal if args.journal is not None else default_journal_path()
 
     if args.undo:
-        return _run_undo(journal, assume_yes=args.yes)
+        return _run_undo(journal, assume_yes=args.yes, dry_run=args.dry_run)
 
     if args.folder is None:
         parser.error("the following arguments are required: folder")
@@ -98,6 +98,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 excludes=args.exclude,
             )
             if not preview.moved:
+                if preview.errors:
+                    for source, message in preview.errors:
+                        print(f"error: {source}: {message}", file=sys.stderr)
+                    print(f"{len(preview.errors)} error(s).", file=sys.stderr)
+                    return 1
+                for skipped in preview.skipped:
+                    print(f"skip: {skipped.path}: {skipped.reason}", file=sys.stderr)
+                if preview.skipped:
+                    print(f"{len(preview.skipped)} skipped.", file=sys.stderr)
                 print("Nothing to organize.")
                 return 0
             print(_format_preview(preview))
@@ -114,7 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 excludes=args.exclude,
                 journal_path=journal,
             )
-    except (FileNotFoundError, NotADirectoryError) as exc:
+    except OSError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
@@ -122,12 +131,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if result.ok else 1
 
 
-def _run_undo(journal: Path, *, assume_yes: bool) -> int:
+def _run_undo(journal: Path, *, assume_yes: bool, dry_run: bool) -> int:
     try:
         preview = undo_last_run(journal, dry_run=True)
-    except (FileNotFoundError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+
+    for destination, reason in preview.skipped:
+        print(f"would skip: {destination}: {reason}", file=sys.stderr)
 
     if not preview.restored:
         print("Nothing to undo.")
@@ -136,6 +148,10 @@ def _run_undo(journal: Path, *, assume_yes: bool) -> int:
     for destination, source in preview.restored:
         print(f"would restore: {destination} -> {source}")
     print(f"\n{len(preview.restored)} file(s) would be restored.")
+
+    if dry_run:
+        print("Dry run: no files were restored.")
+        return 0
 
     if not assume_yes and not _confirm(f"Restore {len(preview.restored)} file(s)?"):
         print("Aborted.")
@@ -161,8 +177,16 @@ def _run_undo(journal: Path, *, assume_yes: bool) -> int:
 
 def _format_preview(result: OrganizeResult) -> str:
     lines = [f"  {move.source} -> {move.destination}" for move in result.moved]
+    for skipped in result.skipped:
+        lines.append(f"  skip: {skipped.path}: {skipped.reason}")
+    for source, message in result.errors:
+        lines.append(f"  error: {source}: {message}")
     lines.append("")
     lines.append(f"{len(result.moved)} file(s) would be moved.")
+    if result.skipped:
+        lines.append(f"{len(result.skipped)} skipped.")
+    if result.errors:
+        lines.append(f"{len(result.errors)} error(s).")
     return "\n".join(lines)
 
 

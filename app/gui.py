@@ -131,7 +131,7 @@ class MainWindow(QMainWindow):
             self.folder_input.setText(folder)
 
     def _selected_folder(self) -> Path | None:
-        text = self.folder_input.text().strip()
+        text = self.folder_input.text().strip().strip('"').strip()
         if not text:
             QMessageBox.warning(self, "Carpeta requerida", "Selecciona una carpeta.")
             return None
