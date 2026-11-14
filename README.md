@@ -75,6 +75,15 @@ La ventana permite elegir la carpeta, alternar entre carpetas del sistema e
 in-place, activar la vista previa (dry-run), excluir patrones y ver el resultado
 o los errores. Las operaciones se ejecutan en segundo plano.
 
+Botones adicionales:
+- **Deshacer último run**: restaura los archivos del último journal, con
+  confirmación previa e informe de omitidos/errores.
+- **Cancelar**: detiene la operación en curso entre archivo y archivo (no
+  interrumpe una copia ya iniciada); los movimientos hechos quedan en el
+  journal y se pueden deshacer.
+- **Abrir carpeta de logs** y **Abrir journal**: abren el explorador en la
+  carpeta de logs o el archivo del último run.
+
 ## Instalador para Windows
 
 Requisitos: Windows 10/11, Python 3.10+ y

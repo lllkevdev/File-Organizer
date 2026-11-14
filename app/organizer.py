@@ -3,7 +3,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import shutil
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +43,7 @@ class OrganizeResult:
     skipped: list[SkippedFile] = field(default_factory=list)
     errors: list[tuple[Path, str]] = field(default_factory=list)
     dry_run: bool = False
+    cancelled: bool = False
 
     def __len__(self) -> int:
         return len(self.moved)
@@ -60,6 +61,7 @@ def organize_files(
     recursive: bool = False,
     excludes: Iterable[str] | None = None,
     journal_path: str | Path | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> OrganizeResult:
     """Validate the folder and move its files to category destinations.
 
@@ -74,6 +76,9 @@ def organize_files(
         excludes: Extra filename patterns to ignore, on top of ``DEFAULT_EXCLUDES``.
         journal_path: When set, write the performed moves to this journal file so
             they can be reverted with :func:`app.journal.undo_last_run`.
+        should_cancel: Optional callback checked before each file. When it returns
+            true the run stops and the result is marked as ``cancelled``; files
+            already moved stay moved and are still journaled.
     """
     folder = Path(folder).resolve()
     _validate_folder(folder)
@@ -91,6 +96,11 @@ def organize_files(
     reserved: set[Path] = set()
 
     for file in files:
+        if should_cancel is not None and should_cancel():
+            result.cancelled = True
+            logger.info("Organize run cancelled before %s", file)
+            break
+
         category = get_category(file)
 
         try:
@@ -134,6 +144,7 @@ def execute_plan(
     plan: OrganizeResult,
     *,
     journal_path: str | Path | None = None,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> OrganizeResult:
     """Execute a plan produced by a dry run without rescanning the source folder.
 
@@ -149,6 +160,11 @@ def execute_plan(
     reserved: set[Path] = set()
 
     for move in plan.moved:
+        if should_cancel is not None and should_cancel():
+            result.cancelled = True
+            logger.info("Plan execution cancelled before %s", move.source)
+            break
+
         source = move.source
 
         try:

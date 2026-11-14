@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from app.journal import read_journal
 from app.organizer import (
     Move,
     OrganizeResult,
@@ -604,3 +605,64 @@ def test_execute_plan_avoids_overwriting_new_file(tmp_path):
     assert (images / "photo.jpg").read_text(encoding="utf-8") == "new"
     assert (images / "photo_1.jpg").exists()
     assert result.moved[0].destination == images / "photo_1.jpg"
+
+
+def test_organize_files_cancel_before_first_file(tmp_path):
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    photo = folder / "photo.jpg"
+    song = folder / "song.mp3"
+    photo.touch()
+    song.touch()
+
+    result = organize_files(folder, to_system=False, should_cancel=lambda: True)
+
+    assert result.cancelled
+    assert result.moved == []
+    assert photo.exists()
+    assert song.exists()
+
+
+def test_organize_files_cancels_between_files_and_journals_partial(tmp_path):
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    photo = folder / "photo.jpg"
+    song = folder / "song.mp3"
+    photo.touch()
+    song.touch()
+    journal = tmp_path / "journal.json"
+    checks = 0
+
+    def cancel_after_first() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    result = organize_files(
+        folder,
+        to_system=False,
+        journal_path=journal,
+        should_cancel=cancel_after_first,
+    )
+
+    assert result.cancelled
+    assert len(result.moved) == 1
+    assert (folder / "Images" / "photo.jpg").exists()
+    assert song.exists()
+    entries = read_journal(journal)
+    assert len(entries) == 1
+    assert entries[0].destination == folder / "Images" / "photo.jpg"
+
+
+def test_execute_plan_honors_cancellation(tmp_path):
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    photo = folder / "photo.jpg"
+    photo.touch()
+    plan = organize_files(folder, to_system=False, dry_run=True)
+
+    result = execute_plan(plan, should_cancel=lambda: True)
+
+    assert result.cancelled
+    assert result.moved == []
+    assert photo.exists()
