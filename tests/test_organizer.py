@@ -1,4 +1,3 @@
-import shutil
 from pathlib import Path
 
 import pytest
@@ -6,6 +5,7 @@ import pytest
 from app.journal import read_journal
 from app.organizer import (
     Move,
+    OperationCancelledError,
     OrganizeResult,
     _collect_files,
     execute_plan,
@@ -273,14 +273,14 @@ def test_move_error_is_reported_and_batch_continues(tmp_path, monkeypatch):
     photo.touch()
     song.touch()
 
-    real_move = shutil.move
+    real_move = move_file
 
-    def failing_move(source, destination):
+    def failing_move(source, destination, **kwargs):
         if str(source).endswith(".jpg"):
             raise OSError("file is locked")
-        return real_move(source, destination)
+        return real_move(source, destination, **kwargs)
 
-    monkeypatch.setattr("app.organizer.shutil.move", failing_move)
+    monkeypatch.setattr("app.organizer.move_file", failing_move)
 
     result = organize_files(folder, to_system=False)
 
@@ -458,14 +458,14 @@ def test_unexpected_error_is_reported_and_batch_continues(tmp_path, monkeypatch)
     (folder / "photo.jpg").touch()
     (folder / "song.mp3").touch()
 
-    real_move = shutil.move
+    real_move = move_file
 
-    def failing_move(source, destination):
+    def failing_move(source, destination, **kwargs):
         if str(source).endswith(".jpg"):
             raise ValueError("boom")
-        return real_move(source, destination)
+        return real_move(source, destination, **kwargs)
 
-    monkeypatch.setattr("app.organizer.shutil.move", failing_move)
+    monkeypatch.setattr("app.organizer.move_file", failing_move)
 
     result = organize_files(folder, to_system=False)
 
@@ -666,3 +666,129 @@ def test_execute_plan_honors_cancellation(tmp_path):
     assert result.cancelled
     assert result.moved == []
     assert photo.exists()
+
+
+def test_move_file_does_not_overwrite_existing_destination(tmp_path):
+    source = tmp_path / "photo.jpg"
+    source.touch()
+    destination = tmp_path / "Images" / "photo.jpg"
+    destination.parent.mkdir()
+    destination.write_text("original", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        move_file(source, destination)
+
+    assert source.exists()
+    assert destination.read_text(encoding="utf-8") == "original"
+
+
+def test_symlinks_are_not_moved(tmp_path):
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    link = folder / "photo.jpg"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("creating symlinks requires privileges on this machine")
+
+    result = organize_files(folder, to_system=False)
+
+    assert result.moved == []
+    assert result.ok
+    assert link.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "secret"
+
+
+def test_journal_write_failure_is_reported(tmp_path, monkeypatch):
+    folder = tmp_path / "Downloads"
+    folder.mkdir()
+    (folder / "photo.jpg").touch()
+
+    def failing_write(*args, **kwargs):
+        raise OSError("disco lleno")
+
+    monkeypatch.setattr("app.journal.write_journal", failing_write)
+    result = organize_files(folder, to_system=False, journal_path=tmp_path / "journal.json")
+
+    assert not result.ok
+    assert any("journal" in message.lower() for _, message in result.errors)
+    assert (folder / "Images" / "photo.jpg").exists()
+
+
+def test_enumeration_error_is_reported(tmp_path, monkeypatch):
+    def failing_collect(*args, **kwargs):
+        raise OSError("access denied")
+
+    monkeypatch.setattr("app.organizer._collect_files", failing_collect)
+    result = organize_files(tmp_path, to_system=False)
+
+    assert not result.ok
+    assert "enumerar" in result.errors[0][1]
+
+
+def test_move_file_cleans_destination_when_source_unlink_fails(tmp_path, monkeypatch):
+    source = tmp_path / "photo.jpg"
+    source.write_text("data", encoding="utf-8")
+    destination = tmp_path / "Images" / "photo.jpg"
+    destination.parent.mkdir()
+    real_unlink = Path.unlink
+
+    def failing_unlink(path, *args, **kwargs):
+        if path == source:
+            raise OSError("file is locked")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    with pytest.raises(OSError):
+        move_file(source, destination)
+
+    assert source.exists()
+    assert not destination.exists()
+
+
+def test_move_file_falls_back_to_copy_when_link_is_unavailable(tmp_path, monkeypatch):
+    source = tmp_path / "photo.jpg"
+    source.write_text("data", encoding="utf-8")
+    destination = tmp_path / "Images" / "photo.jpg"
+    destination.parent.mkdir()
+    link_calls = []
+
+    def failing_link(source_path, destination_path):
+        link_calls.append((source_path, destination_path))
+        raise OSError("links not supported")
+
+    monkeypatch.setattr("app.organizer.os.link", failing_link)
+
+    result = move_file(source, destination)
+
+    assert link_calls
+    assert result == destination
+    assert destination.read_text(encoding="utf-8") == "data"
+    assert not source.exists()
+
+
+def test_move_file_cancel_during_copy_removes_partial_destination(tmp_path, monkeypatch):
+    source = tmp_path / "photo.jpg"
+    source.write_bytes(b"x" * 2_000_000)
+    destination = tmp_path / "Images" / "photo.jpg"
+    destination.parent.mkdir()
+    def failing_link(*_args):
+        raise OSError("links not supported")
+
+    monkeypatch.setattr("app.organizer.os.link", failing_link)
+    checks = 0
+
+    def cancel_after_first_chunk() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    with pytest.raises(OperationCancelledError):
+        move_file(source, destination, should_cancel=cancel_after_first_chunk)
+
+    assert source.exists()
+    assert not destination.exists()
+    assert checks >= 2

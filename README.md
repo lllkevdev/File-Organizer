@@ -40,6 +40,10 @@ file-organizer --undo
 
 # Revisar qué se restauraría sin mover nada
 file-organizer --undo --dry-run
+
+# Ver todos los runs guardados y deshacer uno concreto
+file-organizer --list-runs
+file-organizer --undo-run 2
 ```
 
 Opciones:
@@ -50,14 +54,24 @@ Opciones:
 - `--exclude PATTERN`: patrón de nombre a ignorar; se puede repetir.
 - `-y`, `--yes`: no pide confirmación.
 - `--undo`: restaura los archivos movidos en el último run registrado en el journal.
+- `--undo-run ID`: restaura un run concreto (ver `--list-runs`).
+- `--list-runs`: lista los runs guardados con su id, fecha y cantidad de archivos.
 - `--journal PATH`: ruta del journal a leer/escribir (por defecto en `%LOCALAPPDATA%\FileOrganizer\last-run.json`).
 - `-v`, `--verbose`: logging detallado.
 
-Cada ejecución que mueve archivos escribe un journal con los pares origen→destino.
-`--undo` los restaura en orden inverso, sin sobrescribir archivos existentes.
+Cada ejecución que mueve archivos agrega un run al journal con los pares
+origen→destino. `--undo` restaura el último en orden inverso, sin sobrescribir
+archivos existentes; `--undo-run ID` permite elegir cualquier run anterior. Si un
+journal falla al escribirse, la ejecución se marca como error para que no se
+crea erróneamente que se puede deshacer.
+
+Los movimientos nunca sobrescriben un destino: se usa un enlace duro atómico en
+el mismo volumen y un archivo creado con `O_EXCL` entre volúmenes. Por eso un
+archivo creado en el destino mientras tanto produce un error, no una pérdida.
 
 Por defecto se ignoran archivos y carpetas ocultos (`.DS_Store`, `.git/`, etc.),
-`Thumbs.db`, `desktop.ini`, `~$*` y `*.tmp`.
+`Thumbs.db`, `desktop.ini`, `~$*` y `*.tmp`. También se omiten los enlaces
+simbólicos: solo se mueven archivos regulares.
 
 Los nombres duplicados se resuelven añadiendo un sufijo numérico
 (`foto.jpg` → `foto_1.jpg`). Las carpetas no se mueven.
@@ -76,13 +90,14 @@ in-place, activar la vista previa (dry-run), excluir patrones y ver el resultado
 o los errores. Las operaciones se ejecutan en segundo plano.
 
 Botones adicionales:
-- **Deshacer último run**: restaura los archivos del último journal, con
-  confirmación previa e informe de omitidos/errores.
-- **Cancelar**: detiene la operación en curso entre archivo y archivo (no
-  interrumpe una copia ya iniciada); los movimientos hechos quedan en el
+- **Deshacer último run**: restaura los archivos del run seleccionado en el
+  desplegable `Run` (por defecto, el último), con confirmación previa e informe
+  de omitidos/errores.
+- **Cancelar**: detiene la organización o el deshacer entre archivo y archivo
+  (no interrumpe una copia ya iniciada); los movimientos hechos quedan en el
   journal y se pueden deshacer.
 - **Abrir carpeta de logs** y **Abrir journal**: abren el explorador en la
-  carpeta de logs o el archivo del último run.
+  carpeta de logs o el archivo del journal. Los logs se rotan a 1 MB (3 copias).
 
 ## Instalador para Windows
 
@@ -108,7 +123,7 @@ Salidas:
 
 - `dist\FileOrganizer\FileOrganizer.exe`: GUI portable.
 - `dist\file-organizer.exe`: CLI portable.
-- `dist\installer\FileOrganizer-Setup-<versión>.exe`: instalador (si Inno Setup está disponible). La versión se toma de `app.__version__`.
+- `dist\installer\FileOrganizer-Setup-<versión>.exe`: instalador (si Inno Setup está disponible). La versión se toma de `app.__version__` y se pasa a Inno Setup con `/DMyAppVersion`; el `.iss` no contiene una versión duplicada y falla si se compila sin ese parámetro.
 
 El instalador agrega la app al menú Inicio, crea opcionalmente un acceso directo
 en el escritorio e incluye la CLI en la carpeta de instalación.
@@ -157,5 +172,6 @@ La CI prueba Python 3.10–3.13 en Linux y Windows, exige cobertura mínima del
 
 - Solo Windows para el destino en carpetas del sistema.
 - Solo primer nivel por defecto; usa `--recursive` si lo necesitas.
-- `--undo` solo revierte el último run (un journal); usa `--dry-run` para revisar antes.
+- `--undo` revierte el último run; usa `--list-runs`/`--undo-run ID` para runs anteriores.
+- No se mueven enlaces simbólicos ni carpetas.
 - Las categorías están definidas en `app/config.py`.

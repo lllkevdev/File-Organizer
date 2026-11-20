@@ -2,8 +2,9 @@
 ; Build the PyInstaller outputs first (see installer\build.ps1).
 
 #define MyAppName "File Organizer"
+; MyAppVersion must be supplied by build.ps1 from app.__version__.
 #ifndef MyAppVersion
-  #define MyAppVersion "0.4.2"
+  #error Pasa /DMyAppVersion=<version> (ver installer\build.ps1).
 #endif
 #define MyAppPublisher "File Organizer"
 #define MyAppExeName "FileOrganizer.exe"

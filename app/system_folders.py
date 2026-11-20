@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import sys
 from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 KNOWN_FOLDERS = {
     "Pictures": UUID("{33E28130-4E1E-4676-835A-98395C3BC3BB}"),
@@ -80,7 +83,8 @@ def _get_known_folder_path(folder_key: str) -> Path:
             return Path(path_ptr.value)
         finally:
             ole32.CoTaskMemFree(ctypes.cast(path_ptr, ctypes.c_void_p))
-    except Exception:
+    except OSError as exc:
+        logger.warning("No se pudo resolver %s (%s); usando ruta alternativa", folder_key, exc)
         return _fallback_path(folder_key)
 
 

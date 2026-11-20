@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from app import __version__  # noqa: E402
 from app.gui import MainWindow  # noqa: E402
-from app.journal import write_journal  # noqa: E402
+from app.journal import UndoResult, write_journal  # noqa: E402
 from app.organizer import OrganizeResult  # noqa: E402
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="GUI smoke runs on Windows")
@@ -140,6 +140,91 @@ def test_cancel_button_stops_worker(qapp, tmp_path, monkeypatch):
     assert window.status.text() == "Cancelado."
     assert not window.cancel_button.isEnabled()
 
+    window.close()
+    qapp.processEvents()
+
+
+def test_cancel_button_stops_undo_worker(qapp, tmp_path, monkeypatch):
+    journal = tmp_path / "journal.json"
+    journal.write_text("{}", encoding="utf-8")
+    started = threading.Event()
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+
+    def fake_undo(path, *, dry_run=False, run_id=None, should_cancel=None):
+        if dry_run:
+            return UndoResult(restored=[(destination, source)])
+        started.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if should_cancel is not None and should_cancel():
+                return UndoResult(cancelled=True)
+            time.sleep(0.01)
+        return UndoResult()
+
+    monkeypatch.setattr("app.gui.undo_last_run", fake_undo)
+    monkeypatch.setattr("app.gui.default_journal_path", lambda: journal)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    window = MainWindow()
+    window.show()
+    assert window.undo_button.isEnabled()
+
+    window.undo_button.click()
+    deadline = time.monotonic() + 5
+    while not started.is_set() and time.monotonic() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert started.is_set()
+    assert window.cancel_button.isEnabled()
+    window.cancel_button.click()
+    assert "Cancelando" in window.status.text()
+
+    _wait_for_worker(qapp, window)
+
+    assert window.status.text() == "Cancelado."
+    assert not window.cancel_button.isEnabled()
+    window.close()
+    qapp.processEvents()
+
+
+def test_undo_preview_runs_in_worker(qapp, tmp_path, monkeypatch):
+    journal = tmp_path / "journal.json"
+    journal.write_text("{}", encoding="utf-8")
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+    release_preview = threading.Event()
+    preview_threads = []
+
+    def fake_undo(path, *, dry_run=False, run_id=None, should_cancel=None):
+        if dry_run:
+            preview_threads.append(threading.current_thread())
+            assert release_preview.wait(5)
+            return UndoResult(restored=[(destination, source)])
+        return UndoResult()
+
+    monkeypatch.setattr("app.gui.undo_last_run", fake_undo)
+    monkeypatch.setattr("app.gui.default_journal_path", lambda: journal)
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *args, **kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    window = MainWindow()
+    window.show()
+    qapp.processEvents()
+
+    window.undo_button.click()
+    release_preview.set()
+    _wait_for_worker(qapp, window)
+
+    assert preview_threads
+    assert preview_threads[0] is not threading.current_thread()
     window.close()
     qapp.processEvents()
 

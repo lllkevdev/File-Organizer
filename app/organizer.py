@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import shutil
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -10,6 +11,11 @@ from pathlib import Path
 from app.config import CATEGORIES, COMPOUND_SUFFIXES, DEFAULT_EXCLUDES, UNCATEGORIZED
 
 logger = logging.getLogger(__name__)
+
+
+class OperationCancelledError(Exception):
+    """Raised when cancellation is observed during a file copy."""
+
 
 CATEGORY_DIRS = frozenset(CATEGORIES) | {UNCATEGORIZED}
 _CATEGORY_DIR_NAMES = {name.casefold() for name in CATEGORY_DIRS}
@@ -83,16 +89,21 @@ def organize_files(
     folder = Path(folder).resolve()
     _validate_folder(folder)
 
+    result = OrganizeResult(dry_run=dry_run)
     patterns = (*DEFAULT_EXCLUDES, *(excludes or ()))
-    files = _collect_files(
-        folder,
-        recursive=recursive,
-        excludes=patterns,
-        skip_category_dirs=not to_system,
-    )
+    try:
+        files = _collect_files(
+            folder,
+            recursive=recursive,
+            excludes=patterns,
+            skip_category_dirs=not to_system,
+        )
+    except OSError as exc:
+        logger.warning("Could not enumerate %s: %s", folder, exc)
+        result.errors.append((folder, f"No se pudo enumerar la carpeta: {exc}"))
+        return result
     logger.info("Organizing %d file(s) from %s", len(files), folder)
 
-    result = OrganizeResult(dry_run=dry_run)
     reserved: set[Path] = set()
 
     for file in files:
@@ -120,9 +131,13 @@ def organize_files(
                 reserved.add(destination)
                 continue
 
-            moved_to = move_file(file, destination)
+            moved_to = move_file(file, destination, should_cancel=should_cancel)
             result.moved.append(Move(file, moved_to))
             reserved.add(moved_to)
+        except OperationCancelledError:
+            result.cancelled = True
+            logger.info("Organize run cancelled during copy of %s", file)
+            break
         except Exception as exc:
             logger.warning("Could not move %s: %s", file, exc)
             result.errors.append((file, str(exc)))
@@ -135,7 +150,7 @@ def organize_files(
     )
 
     if not dry_run and journal_path is not None and result.moved:
-        _write_journal(result.moved, journal_path)
+        _record_journal(result, journal_path)
 
     return result
 
@@ -173,26 +188,37 @@ def execute_plan(
                 continue
             move.destination.parent.mkdir(parents=True, exist_ok=True)
             destination = get_unique_destination(move.destination, reserved=reserved)
-            moved_to = move_file(source, destination)
+            moved_to = move_file(source, destination, should_cancel=should_cancel)
             result.moved.append(Move(source, moved_to))
             reserved.add(moved_to)
+        except OperationCancelledError:
+            result.cancelled = True
+            logger.info("Plan execution cancelled during copy of %s", source)
+            break
         except Exception as exc:
             logger.warning("Could not move %s: %s", source, exc)
             result.errors.append((source, str(exc)))
 
     if journal_path is not None and result.moved:
-        _write_journal(result.moved, journal_path)
+        _record_journal(result, journal_path)
 
     return result
+
+
+def _record_journal(result: OrganizeResult, journal_path: str | Path) -> None:
+    try:
+        _write_journal(result.moved, journal_path)
+    except (OSError, ValueError, TypeError) as exc:
+        logger.error("Could not write journal %s: %s", journal_path, exc)
+        result.errors.append(
+            (Path(journal_path), f"No se pudo escribir el journal; no se puede deshacer: {exc}")
+        )
 
 
 def _write_journal(moves: Iterable[Move], journal_path: str | Path) -> None:
     from app.journal import write_journal
 
-    try:
-        write_journal(((move.source, move.destination) for move in moves), journal_path)
-    except OSError as exc:
-        logger.warning("Could not write journal %s: %s", journal_path, exc)
+    write_journal(((move.source, move.destination) for move in moves), journal_path)
 
 
 def _is_same_folder(left: Path, right: Path) -> bool:
@@ -222,7 +248,10 @@ def _collect_files(
     files: list[Path] = []
 
     for item in candidates:
-        if not item.is_file():
+        try:
+            if item.is_symlink() or not item.is_file():
+                continue
+        except OSError:
             continue
         relative = item.relative_to(folder)
         if skip_category_dirs and _is_in_category_dir(item, folder):
@@ -325,11 +354,85 @@ def _split_name(name: str) -> tuple[str, str]:
     return base, f".{extension}"
 
 
-def move_file(file: str | Path, destination: str | Path) -> Path:
-    """Move a file to the specified destination, across filesystems if needed."""
+def move_file(
+    file: str | Path,
+    destination: str | Path,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> Path:
+    """Move a regular file without ever overwriting an existing destination.
+
+    Same-device moves use an atomic hard link plus unlink. Cross-device moves
+    create the destination with ``O_EXCL`` and copy into it, so a concurrent
+    file appearing at the destination causes an error instead of data loss.
+    """
     source = Path(file)
-    destination = Path(destination)
+    target = Path(destination)
 
-    shutil.move(str(source), str(destination))
+    if source.is_symlink() or not source.is_file():
+        raise FileNotFoundError(f"El archivo de origen no existe o no es regular: {source}")
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(f"El destino ya existe: {target}")
 
-    return destination
+    try:
+        same_device = source.stat().st_dev == target.parent.stat().st_dev
+    except OSError:
+        same_device = False
+
+    if same_device:
+        try:
+            os.link(source, target)
+        except OSError:
+            _copy_and_unlink(source, target, should_cancel=should_cancel)
+        else:
+            _unlink_source(source, target)
+    else:
+        _copy_and_unlink(source, target, should_cancel=should_cancel)
+
+    if target.is_symlink() or not target.is_file():
+        raise OSError(f"El movimiento no produjo un archivo regular en: {target}")
+    return target
+
+
+def _unlink_source(source: Path, target: Path) -> None:
+    try:
+        source.unlink()
+    except OSError:
+        _cleanup_partial_target(target)
+        raise
+
+
+def _cleanup_partial_target(target: Path) -> None:
+    try:
+        target.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not remove partial destination %s: %s", target, exc)
+
+
+def _copy_and_unlink(
+    source: Path,
+    target: Path,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> None:
+    with source.open("rb") as src:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY
+        descriptor = os.open(target, flags, 0o666)
+        try:
+            with os.fdopen(descriptor, "wb") as dst:
+                while True:
+                    if should_cancel is not None and should_cancel():
+                        raise OperationCancelledError()
+                    chunk = src.read(1_048_576)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+                dst.flush()
+                os.fsync(dst.fileno())
+            shutil.copystat(source, target)
+        except BaseException:
+            _cleanup_partial_target(target)
+            raise
+    _unlink_source(source, target)

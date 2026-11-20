@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from app import __version__
-from app.journal import default_journal_path, undo_last_run
+from app.journal import default_journal_path, list_runs, undo_last_run
 from app.logging_setup import configure_logging
 from app.organizer import OrganizeResult, execute_plan, organize_files
 
@@ -54,6 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="restore the files moved by the last run recorded in the journal",
     )
     parser.add_argument(
+        "--undo-run",
+        type=int,
+        metavar="ID",
+        help="restore a specific run from the journal (implies --undo)",
+    )
+    parser.add_argument(
+        "--list-runs",
+        action="store_true",
+        help="list the runs recorded in the journal",
+    )
+    parser.add_argument(
         "--journal",
         type=Path,
         default=None,
@@ -80,8 +91,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     journal = args.journal if args.journal is not None else default_journal_path()
 
-    if args.undo:
-        return _run_undo(journal, assume_yes=args.yes, dry_run=args.dry_run)
+    if args.list_runs:
+        return _list_runs(journal)
+
+    if args.undo or args.undo_run is not None:
+        return _run_undo(
+            journal,
+            assume_yes=args.yes,
+            dry_run=args.dry_run,
+            run_id=args.undo_run,
+        )
 
     if args.folder is None:
         parser.error("the following arguments are required: folder")
@@ -131,9 +150,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0 if result.ok else 1
 
 
-def _run_undo(journal: Path, *, assume_yes: bool, dry_run: bool) -> int:
+def _list_runs(journal: Path) -> int:
     try:
-        preview = undo_last_run(journal, dry_run=True)
+        runs = list_runs(journal)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    if not runs:
+        print("No hay runs registrados.")
+        return 0
+    for run in runs:
+        print(f"{run.id}\t{run.created_at}\t{len(run)} archivo(s)")
+    return 0
+
+
+def _run_undo(
+    journal: Path,
+    *,
+    assume_yes: bool,
+    dry_run: bool,
+    run_id: int | None = None,
+) -> int:
+    try:
+        preview = undo_last_run(journal, dry_run=True, run_id=run_id)
     except (OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -157,7 +197,11 @@ def _run_undo(journal: Path, *, assume_yes: bool, dry_run: bool) -> int:
         print("Aborted.")
         return 0
 
-    result = undo_last_run(journal)
+    try:
+        result = undo_last_run(journal, run_id=preview.run_id)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
     for destination, source in result.restored:
         print(f"restored: {destination} -> {source}")
@@ -167,6 +211,8 @@ def _run_undo(journal: Path, *, assume_yes: bool, dry_run: bool) -> int:
         print(f"error: {destination}: {message}", file=sys.stderr)
 
     print(f"\n{len(result.restored)} file(s) restored.")
+    if result.cancelled:
+        print("Undo cancelado.", file=sys.stderr)
     if result.skipped:
         print(f"{len(result.skipped)} skipped.", file=sys.stderr)
     if result.errors:

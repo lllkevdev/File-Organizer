@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -24,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from app import __version__
-from app.journal import UndoResult, default_journal_path, undo_last_run
+from app.journal import UndoResult, default_journal_path, list_runs, undo_last_run
 from app.logging_setup import configure_logging, default_log_path
 from app.organizer import OrganizeResult, organize_files
 
@@ -74,14 +76,30 @@ class UndoWorker(QObject):
     finished = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, journal_path: Path) -> None:
+    def __init__(
+        self,
+        journal_path: Path,
+        *,
+        run_id: int | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+        dry_run: bool = False,
+    ) -> None:
         super().__init__()
         self.journal_path = journal_path
+        self.run_id = run_id
+        self.should_cancel = should_cancel
+        self.dry_run = dry_run
 
     @Slot()
     def run(self) -> None:
         try:
-            self.finished.emit(undo_last_run(self.journal_path))
+            result = undo_last_run(
+                self.journal_path,
+                run_id=self.run_id,
+                should_cancel=self.should_cancel,
+                dry_run=self.dry_run,
+            )
+            self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - surfaced in UI
             self.failed.emit(str(exc))
 
@@ -95,6 +113,10 @@ class MainWindow(QMainWindow):
         self._worker: QObject | None = None
         self._run_id = 0
         self._cancel_event: threading.Event | None = None
+        self._close_requested = False
+        self._close_deadline = 0.0
+        self._pending_undo: tuple[Path, int | None] | None = None
+        self._start_undo_after_cleanup: tuple[Path, int | None] | None = None
 
         central = QWidget(self)
         self.setCentralWidget(central)
@@ -159,6 +181,10 @@ class MainWindow(QMainWindow):
         tools_row.addWidget(self.logs_button)
         tools_row.addWidget(self.journal_button)
         tools_row.addStretch()
+        tools_row.addWidget(QLabel("Run:"))
+        self.run_combo = QComboBox()
+        self.run_combo.setToolTip("Run del journal que se restaurará con Deshacer.")
+        tools_row.addWidget(self.run_combo)
         layout.addLayout(tools_row)
 
         self.log = QPlainTextEdit()
@@ -229,41 +255,53 @@ class MainWindow(QMainWindow):
             return
 
         journal = default_journal_path()
-        try:
-            preview = undo_last_run(journal, dry_run=True)
-        except FileNotFoundError:
+        if not journal.exists():
             QMessageBox.information(
                 self, "Deshacer último run", "No hay ningún run para deshacer."
             )
             self._refresh_undo_button()
             return
-        except (OSError, ValueError) as exc:
-            QMessageBox.warning(
-                self, "Deshacer último run", f"No se pudo leer el journal:\n{exc}"
-            )
-            return
 
-        if not preview.restored:
+        run_id: int | None = self.run_combo.currentData()
+        self._pending_undo = (journal, run_id)
+        self.log.clear()
+        self.status.setText("Calculando vista previa...")
+        self._start_undo_worker(journal, run_id, dry_run=True)
+
+    @Slot(object)
+    def _on_undo_preview_finished(self, result: UndoResult) -> None:
+        pending = self._pending_undo
+        self._pending_undo = None
+
+        if result.cancelled:
+            self.status.setText("Cancelado.")
+            return
+        if not result.restored:
             message = "No hay archivos para restaurar."
-            if preview.skipped:
-                message += f"\n{len(preview.skipped)} archivo(s) se omitirían."
+            if result.skipped:
+                message += f"\n{len(result.skipped)} archivo(s) se omitirían."
             QMessageBox.information(self, "Deshacer último run", message)
+            self.status.setText("Listo.")
+            return
+        if pending is None:
             return
 
-        message = f"Se restaurarán {len(preview.restored)} archivo(s)."
-        if preview.skipped:
-            message += f"\n{len(preview.skipped)} archivo(s) se omitirán."
+        message = f"Se restaurarán {len(result.restored)} archivo(s)."
+        if result.skipped:
+            message += f"\n{len(result.skipped)} archivo(s) se omitirán."
         answer = QMessageBox.question(
             self,
             "Deshacer último run",
             f"{message}\n¿Continuar?",
         )
         if answer != QMessageBox.StandardButton.Yes:
+            self.status.setText("Listo.")
             return
 
-        self.log.clear()
+        journal, selected_id = pending
+        pinned_id = selected_id if selected_id is not None else result.run_id
         self.status.setText("Deshaciendo...")
-        self._start_undo_worker(journal)
+        self._start_undo_after_cleanup = (journal, pinned_id)
 
     def cancel_current_run(self) -> None:
         event = self._cancel_event
@@ -298,33 +336,50 @@ class MainWindow(QMainWindow):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             QMessageBox.warning(self, "No se pudo abrir", f"No se pudo abrir:\n{path}")
 
-    def _start_undo_worker(self, journal: Path) -> None:
+    def _start_undo_worker(
+        self,
+        journal: Path,
+        journal_run_id: int | None,
+        *,
+        dry_run: bool = False,
+    ) -> None:
         if self._thread is not None and self._thread.isRunning():
             return
 
-        self._set_busy(True)
+        self._close_requested = False
+        self._cancel_event = threading.Event()
+        self._set_busy(True, cancellable=True)
         self._run_id += 1
-        run_id = self._run_id
+        worker_id = self._run_id
 
         thread = QThread(self)
-        worker = UndoWorker(journal)
+        worker = UndoWorker(
+            journal,
+            run_id=journal_run_id,
+            should_cancel=self._cancel_event.is_set,
+            dry_run=dry_run,
+        )
         self._thread = thread
         self._worker = worker
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_undo_finished)
+        if dry_run:
+            worker.finished.connect(self._on_undo_preview_finished)
+        else:
+            worker.finished.connect(self._on_undo_finished)
         worker.failed.connect(self._on_failed)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._cleanup_worker_refs(run_id))
+        thread.finished.connect(lambda: self._cleanup_worker_refs(worker_id))
         thread.start()
 
     def _start_worker(self, folder: Path, *, dry_run: bool) -> None:
         if self._thread is not None and self._thread.isRunning():
             return
 
+        self._close_requested = False
         self._cancel_event = threading.Event()
         self._set_busy(True, cancellable=True)
         self.log.clear()
@@ -386,10 +441,10 @@ class MainWindow(QMainWindow):
             self.status.setText("Cancelado.")
         else:
             self.status.setText("Completado.")
-        self._set_busy(False)
 
     @Slot(object)
     def _on_undo_finished(self, result: UndoResult) -> None:
+        self._pending_undo = None
         lines: list[str] = []
         for destination, source in result.restored:
             lines.append(f"Restaurado: {destination} -> {source}")
@@ -403,21 +458,25 @@ class MainWindow(QMainWindow):
             lines.append(f"{len(result.skipped)} omitido(s).")
         if result.errors:
             lines.append(f"{len(result.errors)} error(es).")
+        if result.cancelled:
+            lines.append("\nOperación cancelada por el usuario.")
 
         self.log.setPlainText("\n".join(lines))
         if result.errors:
             self.status.setText("Deshecho con errores.")
+        elif result.cancelled:
+            self.status.setText("Cancelado.")
         elif result.restored:
             self.status.setText("Deshecho.")
         else:
             self.status.setText("Nada restaurado.")
-        self._set_busy(False)
 
     @Slot(str)
     def _on_failed(self, message: str) -> None:
+        self._pending_undo = None
+        self._start_undo_after_cleanup = None
         self.log.setPlainText(f"Error: {message}")
         self.status.setText("Error.")
-        self._set_busy(False)
         QMessageBox.critical(self, "Error", message)
 
     def _cleanup_worker_refs(self, run_id: int) -> None:
@@ -425,30 +484,70 @@ class MainWindow(QMainWindow):
             return
         self._thread = None
         self._worker = None
+        self._set_busy(False)
         self._refresh_undo_button()
 
+        pending = self._start_undo_after_cleanup
+        if pending is not None:
+            self._start_undo_after_cleanup = None
+            journal, journal_run_id = pending
+            self._start_undo_worker(journal, journal_run_id)
+
     def _refresh_undo_button(self) -> None:
-        self.undo_button.setEnabled(
-            self._thread is None and default_journal_path().exists()
-        )
+        selected: int | None = self.run_combo.currentData()
+        self.run_combo.clear()
+        self.run_combo.addItem("Último run", None)
+
+        try:
+            runs = list_runs(default_journal_path())
+        except (OSError, ValueError):
+            runs = []
+
+        for run in runs:
+            label = f"Run #{run.id} — {len(run)} archivo(s)"
+            if run.created_at:
+                label += f" — {run.created_at[:19]}"
+            self.run_combo.addItem(label, run.id)
+
+        if selected is not None:
+            index = self.run_combo.findData(selected)
+            if index >= 0:
+                self.run_combo.setCurrentIndex(index)
+
+        self.undo_button.setEnabled(self._thread is None and bool(runs))
 
     def closeEvent(self, event: QCloseEvent) -> None:
         thread = self._thread
         if thread is not None and thread.isRunning():
             if self._cancel_event is not None:
                 self._cancel_event.set()
+            self.cancel_button.setDisabled(True)
             self.status.setText("Cancelando...")
-            thread.quit()
-            if not thread.wait(10_000):
+            self._close_requested = True
+            self._close_deadline = time.monotonic() + 10.0
+            QTimer.singleShot(100, self._finish_close)
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _finish_close(self) -> None:
+        if not self._close_requested:
+            return
+        thread = self._thread
+        if thread is not None and thread.isRunning():
+            if time.monotonic() < self._close_deadline:
+                QTimer.singleShot(100, self._finish_close)
+            else:
+                self._close_requested = False
                 QMessageBox.information(
                     self,
                     "Operación en curso",
                     "La operación todavía está terminando. Esperá unos segundos "
                     "y volvé a cerrar.",
                 )
-                event.ignore()
-                return
-        super().closeEvent(event)
+            return
+        self._close_requested = False
+        self.close()
 
     def _set_busy(self, busy: bool, *, cancellable: bool = False) -> None:
         for widget in (
@@ -462,6 +561,7 @@ class MainWindow(QMainWindow):
             self.exclude_input,
             self.logs_button,
             self.journal_button,
+            self.run_combo,
         ):
             widget.setDisabled(busy)
 

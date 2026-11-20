@@ -39,6 +39,19 @@ jobs:
       - name: Test
         run: pytest --cov=app --cov-report=term-missing
 
+      - name: Check single-source version
+        run: python -c "import re, pathlib; s = pathlib.Path('installer/file-organizer.iss').read_text(encoding='utf-8'); assert not re.search(r'\d+\.\d+\.\d+', s), 'version duplicada en el .iss'; print('version ok')"
+
+      - name: Build distribution
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: python -m build
+
+      - name: Verify installed wheel
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          file-organizer --version
+
   build-windows:
     runs-on: windows-latest
     needs: test

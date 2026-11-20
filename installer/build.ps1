@@ -30,9 +30,9 @@ if ($LASTEXITCODE -ne 0 -or -not $versionOutput) {
 }
 $version = ("$versionOutput").Trim()
 
-& $python -m pip install --disable-pip-version-check -q pyinstaller
+& $python -c "import PyInstaller" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    throw "No se pudo instalar PyInstaller."
+    throw "PyInstaller no esta instalado. Ejecuta: pip install -e '.[dev]'"
 }
 
 if (-not $NoClean) {

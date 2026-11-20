@@ -1,6 +1,9 @@
+import shutil
+
 import pytest
 
 from app.__main__ import main
+from app.__main__ import undo_last_run as real_undo_last_run
 from app.journal import write_journal
 from app.organizer import get_destination
 
@@ -191,3 +194,73 @@ def test_cli_missing_folder_returns_error(tmp_path):
 def test_cli_folder_is_required():
     with pytest.raises(SystemExit):
         main(["--dry-run"])
+
+
+def test_cli_list_runs_and_undo_specific_run(tmp_path, capsys):
+    journal = tmp_path / "journal.json"
+    pairs = [
+        (tmp_path / "a.txt", tmp_path / "dest_a" / "a.txt", "a"),
+        (tmp_path / "b.txt", tmp_path / "dest_b" / "b.txt", "b"),
+    ]
+    for source, destination, content in pairs:
+        destination.parent.mkdir()
+        source.write_text(content, encoding="utf-8")
+        shutil.move(str(source), str(destination))
+        write_journal([(source, destination)], journal)
+
+    code = main(["--list-runs", "--journal", str(journal)])
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "1" in output and "2" in output
+
+    code = main(["--undo-run", "1", "--yes", "--journal", str(journal)])
+    assert code == 0
+    assert (tmp_path / "a.txt").exists()
+    assert (tmp_path / "dest_b" / "b.txt").exists()
+
+
+def test_cli_undo_handles_journal_changed_after_preview(tmp_path, monkeypatch, capsys):
+    journal = tmp_path / "journal.json"
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+    destination.parent.mkdir()
+    destination.write_text("data", encoding="utf-8")
+    write_journal([(source, destination)], journal)
+
+    calls = 0
+
+    def flaky_undo(path, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_undo_last_run(path, **kwargs)
+        raise ValueError("journal cambiado")
+
+    monkeypatch.setattr("app.__main__.undo_last_run", flaky_undo)
+    code = main(["--undo", "--yes", "--journal", str(journal)])
+
+    assert code == 2
+    assert "Error" in capsys.readouterr().err
+    assert destination.exists()
+
+
+def test_cli_undo_uses_preview_run_id(tmp_path, monkeypatch):
+    journal = tmp_path / "journal.json"
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+    destination.parent.mkdir()
+    destination.write_text("data", encoding="utf-8")
+    write_journal([(source, destination)], journal)
+    seen_run_ids = []
+
+    def recording_undo(path, **kwargs):
+        seen_run_ids.append(kwargs.get("run_id"))
+        return real_undo_last_run(path, **kwargs)
+
+    monkeypatch.setattr("app.__main__.undo_last_run", recording_undo)
+
+    code = main(["--undo", "--yes", "--journal", str(journal)])
+
+    assert code == 0
+    assert seen_run_ids == [None, 1]
+    assert source.read_text(encoding="utf-8") == "data"

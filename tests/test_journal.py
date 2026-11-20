@@ -1,9 +1,12 @@
+import json
 import shutil
+import threading
 
 import pytest
 
 from app.journal import (
     default_journal_path,
+    list_runs,
     read_journal,
     undo_last_run,
     write_journal,
@@ -178,3 +181,157 @@ def test_default_journal_path_honors_localappdata(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
 
     assert default_journal_path() == tmp_path / "FileOrganizer" / "last-run.json"
+
+
+def test_journal_history_and_undo_specific_run(tmp_path):
+    journal = tmp_path / "journal.json"
+    pairs = [
+        (tmp_path / "a.txt", tmp_path / "dest_a" / "a.txt", "a"),
+        (tmp_path / "b.txt", tmp_path / "dest_b" / "b.txt", "b"),
+    ]
+    for source, destination, content in pairs:
+        destination.parent.mkdir()
+        source.write_text(content, encoding="utf-8")
+        shutil.move(str(source), str(destination))
+        write_journal([(source, destination)], journal)
+
+    runs = list_runs(journal)
+    assert [run.id for run in runs] == [1, 2]
+    assert len(read_journal(journal, run_id=1)) == 1
+
+    first = undo_last_run(journal, run_id=1)
+    assert first.ok
+    assert len(first) == 1
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a"
+    assert (tmp_path / "dest_b" / "b.txt").exists()
+    assert [run.id for run in list_runs(journal)] == [2]
+
+    second = undo_last_run(journal)
+    assert second.ok
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b"
+    assert not journal.exists()
+
+
+def test_read_journal_rejects_unknown_run(tmp_path):
+    journal = tmp_path / "journal.json"
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+    write_journal([(source, destination)], journal)
+
+    with pytest.raises(ValueError):
+        read_journal(journal, run_id=99)
+
+
+def test_legacy_journal_can_be_undone_by_run_id(tmp_path):
+    journal = tmp_path / "journal.json"
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+    destination.parent.mkdir()
+    source.write_text("legacy", encoding="utf-8")
+    shutil.move(str(source), str(destination))
+    journal.write_text(
+        json.dumps(
+            {
+                "created_at": "old",
+                "entries": [{"source": str(source), "destination": str(destination)}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert [run.id for run in list_runs(journal)] == [1]
+    result = undo_last_run(journal, run_id=1)
+
+    assert result.ok
+    assert source.read_text(encoding="utf-8") == "legacy"
+    assert not journal.exists()
+
+
+def test_undo_can_be_cancelled(tmp_path):
+    source = tmp_path / "a.txt"
+    destination = tmp_path / "dest" / "a.txt"
+    destination.parent.mkdir()
+    destination.write_text("data", encoding="utf-8")
+    journal = tmp_path / "journal.json"
+    write_journal([(source, destination)], journal)
+
+    result = undo_last_run(journal, should_cancel=lambda: True)
+
+    assert result.cancelled
+    assert result.restored == []
+    assert destination.exists()
+    assert journal.exists()
+
+
+def test_write_journal_migrates_legacy_without_losing_entries(tmp_path):
+    journal = tmp_path / "journal.json"
+    legacy_source = tmp_path / "legacy.txt"
+    legacy_destination = tmp_path / "legacy_dest" / "legacy.txt"
+    new_source = tmp_path / "new.txt"
+    new_destination = tmp_path / "new_dest" / "new.txt"
+    journal.write_text(
+        json.dumps(
+            {
+                "created_at": "old",
+                "entries": [
+                    {"source": str(legacy_source), "destination": str(legacy_destination)}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    write_journal([(new_source, new_destination)], journal)
+
+    runs = list_runs(journal)
+    assert [run.id for run in runs] == [1, 2]
+    assert read_journal(journal, run_id=1)[0].source == legacy_source
+    assert read_journal(journal, run_id=2)[0].source == new_source
+
+
+def test_concurrent_writes_keep_every_run(tmp_path):
+    journal = tmp_path / "journal.json"
+    barrier = threading.Barrier(8)
+
+    def write_run(index: int) -> None:
+        barrier.wait()
+        source = tmp_path / f"file-{index}.txt"
+        destination = tmp_path / "dest" / source.name
+        write_journal([(source, destination)], journal)
+
+    threads = [threading.Thread(target=write_run, args=(index,)) for index in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    runs = list_runs(journal)
+    assert len(runs) == 8
+    assert [run.id for run in runs] == list(range(1, 9))
+
+
+def test_undo_pinned_run_ignores_newer_writes(tmp_path):
+    journal = tmp_path / "journal.json"
+    pairs = [
+        (tmp_path / "a.txt", tmp_path / "dest_a" / "a.txt", "a"),
+        (tmp_path / "b.txt", tmp_path / "dest_b" / "b.txt", "b"),
+    ]
+    for source, destination, content in pairs:
+        destination.parent.mkdir()
+        source.write_text(content, encoding="utf-8")
+        shutil.move(str(source), str(destination))
+        write_journal([(source, destination)], journal)
+
+    preview = undo_last_run(journal, dry_run=True, run_id=1)
+    assert preview.run_id == 1
+
+    write_journal([(tmp_path / "c.txt", tmp_path / "dest_c" / "c.txt")], journal)
+
+    result = undo_last_run(journal, run_id=preview.run_id)
+
+    assert result.ok
+    assert result.run_id == 1
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a"
+    assert (tmp_path / "dest_b" / "b.txt").exists()
+    assert [run.id for run in list_runs(journal)] == [2, 3]
